@@ -1,0 +1,27 @@
+name: Auto Update VLESS Subscription
+
+on:
+  schedule:
+    - cron: '0 */2 * * *' # Запуск каждые 2 часа
+  workflow_dispatch: # Позволяет запустить вручную из вкладки Actions
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run update script
+        env:
+          GIST_ID: 'ваш_id_гиста_из_ссылки'
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+        run: python update_sub.py
