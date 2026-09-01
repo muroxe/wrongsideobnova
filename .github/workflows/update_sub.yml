@@ -2,8 +2,8 @@ name: Auto Update VLESS Subscription
 
 on:
   schedule:
-    - cron: '0 */2 * * *' # Запуск каждые 2 часа
-  workflow_dispatch: # Позволяет запустить вручную из вкладки Actions
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
 
 jobs:
   update:
@@ -22,6 +22,7 @@ jobs:
 
       - name: Run update script
         env:
-          GIST_ID: 'ваш_id_гиста_из_ссылки'
+          GIST_ID: 'd80e40f8efb3fcfacd9c631e12c73e1e'
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
         run: python update_sub.py
+        
