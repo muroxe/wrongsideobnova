@@ -1,105 +1,124 @@
-import base64
-import json
 import os
+import re
+import base64
 import requests
 
-# Настройки
-GIST_URL = os.environ.get("https://gist.githubusercontent.com/muroxe/d80e40f8efb3fcfacd9c631e12c73e1e/raw/70d8bec8fb0f9bf4e4063657db692a00134a1565/sub.txt")  # Ссылка на RAW вашего Gist
-GIST_TOKEN = os.environ.get(
-    "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"
-)  # Токен GitHub с правами на запись в Gist
-GIST_ID = os.environ.get("d80e40f8efb3fcfacd9c631e12c73e1e")  # ID вашего Gist
-CHECKER_JSON = "https://tiagorrg.github.io/vless-checker/keys.json"
+GIST_TOKEN = os.environ.get("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")
+GIST_ID = os.environ.get("GIST_ID", "d80e40f8efb3fcfacd9c631e12c73e1e")
 
+# Источники свежих проверенных VLESS-конфигов, используемые чекером
+SOURCES = [
+    "https://raw.githubusercontent.com/youshandefeiyang/sub/main/vless.txt",
+    "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2",
+    "https://raw.githubusercontent.com/freefq/free/master/v2",
+    "https://raw.githubusercontent.com/peassss/vless-checker/main/sub.txt"
+]
 
-def get_fresh_keys():
-  try:
-    response = requests.get(CHECKER_JSON)
-    data = response.json()
-    # Извлекаем список ключей (в зависимости от структуры keys.json)
-    # Обычно это список строк vless:// или объектов с полем config/link
+def decode_base64_safely(data: str) -> str:
+    cleaned = data.strip().replace(" ", "").replace("\n", "").replace("\r", "")
+    missing_padding = len(cleaned) % 4
+    if missing_padding:
+        cleaned += "=" * (4 - missing_padding)
+    try:
+        return base64.b64decode(cleaned).decode("utf-8", errors="ignore")
+    except Exception:
+        return data
+
+def get_fresh_vless_keys() -> list:
     keys = []
-    items = data.get("keys", data) if isinstance(data, dict) else data
-    for item in items:
-      if isinstance(item, str) and item.startswith("vless://"):
-        keys.append(item)
-      elif isinstance(item, dict):
-        link = item.get("link") or item.get("config") or item.get("url")
-        if link and link.startswith("vless://"):
-          keys.append(link)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    for url in SOURCES:
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                continue
+            
+            raw_text = res.text
+            # Декодируем, если источник отдает данные в base64
+            if "vless://" not in raw_text:
+                decoded = decode_base64_safely(raw_text)
+                if "vless://" in decoded:
+                    raw_text = decoded
 
-    print(f"Найдено ключей с чекера: {len(keys)}")
-    return keys[:3]  # Берем первые 3 рабочих ключа
-  except Exception as e:
-    print(f"Ошибка при получении ключей с чекера: {e}")
-    return []
+            # Извлекаем все валидные vless:// строки
+            found = re.findall(r"(vless://[^\s\r\n]+)", raw_text)
+            for key in found:
+                if key not in keys:
+                    keys.append(key)
+            
+            if len(keys) >= 3:
+                break
+        except Exception as e:
+            print(f"Ошибка при запросе к {url}: {e}")
+            continue
 
+    print(f"Всего найдено свежих VLESS ключей: {len(keys)}")
+    return keys[:3]
 
-def update_gist(new_keys):
-  if not new_keys:
-    print("Нет новых ключей для обновления.")
-    return
+def update_gist(new_keys: list):
+    if not new_keys:
+        raise Exception("Не удалось получить ни одного рабочего ключа.")
 
-  headers = {
-      "Authorization": f"token {GIST_TOKEN}",
-      "Accept": "application/vnd.github.v3+json",
-  }
+    if not GIST_TOKEN or not GIST_ID:
+        raise Exception("Отсутствует GIST_TOKEN или GIST_ID в переменных окружения.")
 
-  # Получаем текущее содержимое Gist
-  r = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers)
-  if r.status_code != 200:
-    print(f"Ошибка получения Gist: {r.status_code}")
-    return
+    headers = {
+        "Authorization": f"Bearer {GIST_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
 
-  gist_data = r.json()
-  filename = list(gist_data["files"].keys())[0]
-  old_content = gist_data["files"][filename]["content"]
+    # Получаем структуру и файлы Gist
+    get_res = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers, timeout=10)
+    if get_res.status_code != 200:
+        raise Exception(f"Ошибка получения Gist ({get_res.status_code}): {get_res.text}")
 
-  # Декодируем, если подписка в Base64 (обычно подписки хранятся в Base64)
-  try:
-    decoded_bytes = base64.b64decode(
-        old_content + "==="
-    )  # на случай неполного padding
-    decoded_text = decoded_bytes.decode("utf-8")
-    is_base64 = True
-  except Exception:
-    decoded_text = old_content
+    gist_json = get_res.json()
+    files = gist_json.get("files", {})
+    if not files:
+        raise Exception("В Gist не найдено файлов для обновления.")
+
+    filename = list(files.keys())[0]
+    old_content = files[filename].get("content", "")
+
+    # Проверяем формат текущей подписки (Base64 или Plain text)
     is_base64 = False
+    if "vless://" not in old_content and "vmess://" not in old_content:
+        decoded_try = decode_base64_safely(old_content)
+        if "vless://" in decoded_try or "vmess://" in decoded_try or "ss://" in decoded_try:
+            old_content = decoded_try
+            is_base64 = True
 
-  # Логика замены: допустим, мы хотим заменить старые vless строки на новые
-  # Или просто перезаписать определенные строки, либо добавить их в конец.
-  # Самый простой способ — оставить постоянные конфиги, а блок с динамическими заменить.
-  lines = decoded_text.splitlines()
-  filtered_lines = [
-      line for line in lines if not line.startswith("vless://")
-  ]  # Удаляем старые vless
+    # Оставляем статичные ключи (например, ваши личные или не-vless) и убираем старые авто-ключи
+    lines = [line.strip() for line in old_content.splitlines() if line.strip()]
+    static_lines = [line for line in lines if not line.startswith("vless://")]
 
-  # Добавляем новые свежие ключи
-  updated_lines = filtered_lines + new_keys
-  final_text = "\n".join(updated_lines)
+    # Формируем обновленный список
+    updated_lines = static_lines + new_keys
+    final_raw_content = "\n".join(updated_lines)
 
-  # Если оригинал был в base64, кодируем обратно
-  if is_base64:
-    payload_content = base64.b64encode(final_text.encode("utf-8")).decode(
-        "utf-8"
-    )
-  else:
-    payload_content = final_text
+    if is_base64:
+        final_payload = base64.b64encode(final_raw_content.encode("utf-8")).decode("utf-8")
+    else:
+        final_payload = final_raw_content
 
-  # Отправляем обновленный Gist
-  update_payload = {"files": {filename: {"content": payload_content}}}
-  update_r = requests.patch(
-      f"https://api.github.com/gists/{GIST_ID}",
-      headers=headers,
-      json=update_payload,
-  )
+    # Отправляем PATCH запрос на обновление Gist
+    patch_payload = {
+        "files": {
+            filename: {
+                "content": final_payload
+            }
+        }
+    }
 
-  if update_r.status_code == 200:
-    print("Подписка успешно обновлена!")
-  else:
-    print(f"Ошибка обновления Gist: {update_r.status_code} - {update_r.text}")
-
+    patch_res = requests.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=patch_payload, timeout=10)
+    if patch_res.status_code == 200:
+        print(f"Gist успешно обновлен! Записано {len(new_keys)} новых ключей.")
+    else:
+        raise Exception(f"Ошибка обновления Gist ({patch_res.status_code}): {patch_res.text}")
 
 if __name__ == "__main__":
-  new_keys = get_fresh_keys()
-  update_gist(new_keys)
+    fresh_keys = get_fresh_vless_keys()
+    update_gist(fresh_keys)
+    
