@@ -3,7 +3,7 @@ import re
 import base64
 import requests
 
-GIST_TOKEN = os.environ.get("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")
+GIST_TOKEN = os.environ.get("GIST_TOKEN")
 GIST_ID = os.environ.get("GIST_ID", "d80e40f8efb3fcfacd9c631e12c73e1e")
 
 # Прямые ссылки на RAW-файлы с проверенными VLESS конфигами из igareck/vpn-configs-for-russia
