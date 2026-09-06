@@ -2,12 +2,20 @@ import os
 import re
 import base64
 import random
+import urllib.parse
 import requests
+from datetime import datetime
 
 GIST_TOKEN = os.environ.get("GIST_TOKEN")
 GIST_ID = os.environ.get("GIST_ID", "d80e40f8efb3fcfacd9c631e12c73e1e")
 
-# Прямые ссылки на RAW-файлы с проверенными VLESS конфигами
+# === ВАШИ СОБСТВЕННЫЕ ПУСТЫШКИ (ОФОРМЛЕНИЕ) ===
+# Можете менять текст, добавлять эмодзи. Они будут всегда сверху списка.
+CUSTOM_HEADERS = [
+    "👅t.me/WrongSideVPN👅",
+    f"Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+]
+
 SOURCES = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
@@ -26,23 +34,19 @@ def decode_base64_safely(data: str) -> str:
     except Exception:
         return data
 
-def is_valid_key(key: str) -> bool:
-    # Отсеиваем ключи-заглушки (декоративные заголовки), которые ведут на локальный IP
-    if "@127.0.0.1:" in key or "@0.0.0.0:" in key:
-        return False
-    return True
+def generate_dummy(name: str) -> str:
+    # Генерирует фейковый нерабочий ключ для вывода текста
+    encoded_name = urllib.parse.quote(name)
+    return f"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:80?type=tcp&security=none#{encoded_name}"
 
 def get_fresh_vless_keys() -> list:
-    keys = []
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
+    real_keys = []
+    headers_req = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
     for url in SOURCES:
         try:
-            res = requests.get(url, headers=headers, timeout=10)
+            res = requests.get(url, headers=headers_req, timeout=10)
             if res.status_code != 200:
-                print(f"Источник {url} вернул код {res.status_code}")
                 continue
             
             raw_text = res.text
@@ -50,29 +54,47 @@ def get_fresh_vless_keys() -> list:
             
             for key in found:
                 clean_key = key.strip()
-                if clean_key not in keys and is_valid_key(clean_key):
-                    keys.append(clean_key)
-            
-            print(f"Из файла {url.split('/')[-1]} получено ключей: {len(found)}")
-            
+                name = ""
+                if "#" in clean_key:
+                    name = urllib.parse.unquote(clean_key.split("#", 1)[1]).lower()
+                
+                # Жесткий фильтр: отсекаем чужой мусор и чужие каналы
+                is_dummy = False
+                bad_words = ["🛸", "🪐", "t.me", "wrongside", "update", "github", "127.0.0.1", "0.0.0.0"]
+                
+                for word in bad_words:
+                    if word in name or word in clean_key.lower():
+                        is_dummy = True
+                        break
+                
+                # Если сервер прошел проверку - берем
+                if not is_dummy and clean_key not in real_keys:
+                    real_keys.append(clean_key)
+                    
         except Exception as e:
             print(f"Ошибка при загрузке {url}: {e}")
             continue
 
-    if not keys:
+    print(f"Собрано реальных серверов: {len(real_keys)}")
+    
+    if not real_keys:
         return []
-
-    # Берем 5 случайных ключей из всей собранной массы, чтобы не цеплять только начало файла
-    selected_keys = random.sample(keys, min(5, len(keys)))
-    print(f"Итого собрано уникальных ключей: {len(keys)}. Выбрано случайных для подписки: {len(selected_keys)}.")
-    return selected_keys
+        
+    # Выбираем 5 случайных рабочих серверов
+    selected_real = random.sample(real_keys, min(5, len(real_keys)))
+    
+    # Формируем итоговый список (сначала свои пустышки, потом сервера)
+    final_keys = [generate_dummy(text) for text in CUSTOM_HEADERS]
+    final_keys.extend(selected_real)
+    
+    return final_keys
 
 def update_gist(new_keys: list):
     if not new_keys:
-        raise Exception("Не удалось получить ни одного рабочего ключа из источников.")
+        raise Exception("Не удалось получить рабочие ключи.")
 
     if not GIST_TOKEN:
-        raise Exception("Секрет GIST_TOKEN не найден в Secrets репозитория.")
+        raise Exception("Секрет GIST_TOKEN не найден.")
 
     headers = {
         "Authorization": f"Bearer {GIST_TOKEN}",
@@ -80,28 +102,22 @@ def update_gist(new_keys: list):
         "X-GitHub-Api-Version": "2022-11-28"
     }
 
-    # Получаем структуру файлов вашего Gist
     get_res = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers, timeout=10)
     if get_res.status_code != 200:
-        raise Exception(f"Ошибка доступа к Gist ({get_res.status_code}): {get_res.text}")
+        raise Exception(f"Ошибка доступа к Gist ({get_res.status_code})")
 
     gist_json = get_res.json()
     files = gist_json.get("files", {})
-    if not files:
-        raise Exception("В Gist не найдено ни одного файла.")
-
     filename = list(files.keys())[0]
     old_content = files[filename].get("content", "")
 
-    # Проверяем, зашифрован ли текущий gist в Base64
     is_base64 = False
-    if "vless://" not in old_content and "vmess://" not in old_content and "ss://" not in old_content:
+    if "vless://" not in old_content and "vmess://" not in old_content:
         decoded_try = decode_base64_safely(old_content)
-        if any(proto in decoded_try for proto in ["vless://", "vmess://", "ss://", "trojan://", "hysteria2://"]):
+        if "vless://" in decoded_try:
             old_content = decoded_try
             is_base64 = True
 
-    # Очищаем старые ключи vless и объединяем с новыми
     lines = [line.strip() for line in old_content.splitlines() if line.strip()]
     static_lines = [line for line in lines if not line.startswith("vless://")]
 
@@ -113,19 +129,13 @@ def update_gist(new_keys: list):
     else:
         final_payload = final_raw_content
 
-    patch_payload = {
-        "files": {
-            filename: {
-                "content": final_payload
-            }
-        }
-    }
+    patch_payload = {"files": {filename: {"content": final_payload}}}
 
     patch_res = requests.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=patch_payload, timeout=10)
     if patch_res.status_code == 200:
-        print(f"Gist успешно обновлен! Записано {len(new_keys)} свежих ключей.")
+        print(f"Успех! Обновлено ключей: {len(new_keys)}.")
     else:
-        raise Exception(f"Ошибка записи в Gist ({patch_res.status_code}): {patch_res.text}")
+        raise Exception(f"Ошибка записи в Gist ({patch_res.status_code})")
 
 if __name__ == "__main__":
     fresh_keys = get_fresh_vless_keys()
