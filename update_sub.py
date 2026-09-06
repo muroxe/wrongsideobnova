@@ -2,13 +2,14 @@ import os
 import re
 import base64
 import random
+import socket
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 import requests
 
 GIST_TOKEN = os.environ.get("GIST_TOKEN")
 GIST_ID = os.environ.get("GIST_ID", "d80e40f8efb3fcfacd9c631e12c73e1e")
 
-# === ВАШИ СОБСТВЕННЫЕ ПУСТЫШКИ (ОФОРМЛЕНИЕ) ===
 CUSTOM_HEADERS = [
     "👅t.me/WrongSideVPN👅"
 ]
@@ -32,12 +33,35 @@ def decode_base64_safely(data: str) -> str:
         return data
 
 def generate_dummy(name: str) -> str:
-    # Генерирует фейковый нерабочий ключ для вывода текста
     encoded_name = urllib.parse.quote(name)
     return f"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:80?type=tcp&security=none#{encoded_name}"
 
+def check_server_alive(key: str) -> bool:
+    """Проверяет доступность сервера по TCP порту."""
+    try:
+        # vless://uuid@host:port?...
+        parts = key.split("@")
+        if len(parts) < 2:
+            return False
+        host_port = parts[1].split("?")[0].split("#")[0]
+        
+        # Поддержка IPv6 в квадратных скобках [::1]:port
+        if "]:" in host_port:
+            host, port_str = host_port.split("]:")
+            host = host.lstrip("[")
+        else:
+            host, port_str = host_port.split(":")
+            
+        port = int(port_str)
+        
+        # Проверяем TCP соединение с таймаутом 2.5 секунды
+        with socket.create_connection((host, port), timeout=2.5):
+            return True
+    except Exception:
+        return False
+
 def get_fresh_vless_keys() -> list:
-    real_keys = []
+    candidates = []
     headers_req = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
     for url in SOURCES:
@@ -55,40 +79,48 @@ def get_fresh_vless_keys() -> list:
                 if "#" in clean_key:
                     name = urllib.parse.unquote(clean_key.split("#", 1)[1]).lower()
                 
-                # Жесткий фильтр: отсекаем чужой мусор и чужие каналы
-                is_dummy = False
+                # Отсекаем заглушки и невалидные IP
                 bad_words = ["🛸", "🪐", "t.me", "wrongside", "update", "github", "127.0.0.1", "0.0.0.0"]
+                if any(word in name or word in clean_key.lower() for word in bad_words):
+                    continue
                 
-                for word in bad_words:
-                    if word in name or word in clean_key.lower():
-                        is_dummy = True
-                        break
-                
-                # Если сервер прошел проверку - берем
-                if not is_dummy and clean_key not in real_keys:
-                    real_keys.append(clean_key)
+                if clean_key not in candidates:
+                    candidates.append(clean_key)
                     
         except Exception as e:
             print(f"Ошибка при загрузке {url}: {e}")
             continue
 
-    print(f"Собрано реальных серверов: {len(real_keys)}")
-    
-    if not real_keys:
+    print(f"Всего кандидатов для проверки: {len(candidates)}")
+    if not candidates:
         return []
-        
-    # Выбираем 5 случайных рабочих серверов
-    selected_real = random.sample(real_keys, min(5, len(real_keys)))
+
+    # Перемешиваем кандидатов перед пингом
+    random.shuffle(candidates)
     
-    # Формируем итоговый список (сначала свои пустышки, потом сервера)
+    alive_keys = []
+    # Быстрая параллельная проверка доступности серверов (в 20 потоков)
+    print("Проверяем доступность серверов (TCP Ping)...")
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        results = executor.map(lambda k: (k, check_server_alive(k)), candidates[:60])
+        for key, is_alive in results:
+            if is_alive:
+                alive_keys.append(key)
+                if len(alive_keys) >= 5:
+                    break
+
+    print(f"Найдено живых серверов: {len(alive_keys)}")
+
+    # Формируем итоговый список: кастомная плашка + только живые ноды
     final_keys = [generate_dummy(text) for text in CUSTOM_HEADERS]
-    final_keys.extend(selected_real)
+    final_keys.extend(alive_keys)
     
     return final_keys
 
 def update_gist(new_keys: list):
-    if not new_keys:
-        raise Exception("Не удалось получить рабочие ключи.")
+    # Должен быть хотя бы 1 живой сервер помимо кастомной плашки
+    if len(new_keys) <= len(CUSTOM_HEADERS):
+        raise Exception("Не удалось найти ни одного живого сервера.")
 
     if not GIST_TOKEN:
         raise Exception("Секрет GIST_TOKEN не найден.")
@@ -130,7 +162,7 @@ def update_gist(new_keys: list):
 
     patch_res = requests.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=patch_payload, timeout=10)
     if patch_res.status_code == 200:
-        print(f"Успех! Обновлено ключей: {len(new_keys)}.")
+        print(f"Успех! Обновлено: {len(new_keys) - len(CUSTOM_HEADERS)} живых серверов.")
     else:
         raise Exception(f"Ошибка записи в Gist ({patch_res.status_code})")
 
