@@ -12,8 +12,7 @@ GIST_ID = os.environ.get("GIST_ID", "d80e40f8efb3fcfacd9c631e12c73e1e")
 # === ВАШИ СОБСТВЕННЫЕ ПУСТЫШКИ (ОФОРМЛЕНИЕ) ===
 # Можете менять текст, добавлять эмодзи. Они будут всегда сверху списка.
 CUSTOM_HEADERS = [
-    "👅t.me/WrongSideVPN👅",
-    f"Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    "👅t.me/WrongSideVPN👅"
 ]
 
 SOURCES = [
