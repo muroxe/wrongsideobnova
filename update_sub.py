@@ -4,13 +4,11 @@ import base64
 import random
 import urllib.parse
 import requests
-from datetime import datetime
 
 GIST_TOKEN = os.environ.get("GIST_TOKEN")
 GIST_ID = os.environ.get("GIST_ID", "d80e40f8efb3fcfacd9c631e12c73e1e")
 
 # === ВАШИ СОБСТВЕННЫЕ ПУСТЫШКИ (ОФОРМЛЕНИЕ) ===
-# Можете менять текст, добавлять эмодзи. Они будут всегда сверху списка.
 CUSTOM_HEADERS = [
     "👅t.me/WrongSideVPN👅"
 ]
