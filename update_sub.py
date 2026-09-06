@@ -1,12 +1,13 @@
 import os
 import re
 import base64
+import random
 import requests
 
 GIST_TOKEN = os.environ.get("GIST_TOKEN")
 GIST_ID = os.environ.get("GIST_ID", "d80e40f8efb3fcfacd9c631e12c73e1e")
 
-# Прямые ссылки на RAW-файлы с проверенными VLESS конфигами из igareck/vpn-configs-for-russia
+# Прямые ссылки на RAW-файлы с проверенными VLESS конфигами
 SOURCES = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
@@ -24,6 +25,12 @@ def decode_base64_safely(data: str) -> str:
         return base64.b64decode(cleaned).decode("utf-8", errors="ignore")
     except Exception:
         return data
+
+def is_valid_key(key: str) -> bool:
+    # Отсеиваем ключи-заглушки (декоративные заголовки), которые ведут на локальный IP
+    if "@127.0.0.1:" in key or "@0.0.0.0:" in key:
+        return False
+    return True
 
 def get_fresh_vless_keys() -> list:
     keys = []
@@ -43,23 +50,26 @@ def get_fresh_vless_keys() -> list:
             
             for key in found:
                 clean_key = key.strip()
-                if clean_key not in keys:
+                if clean_key not in keys and is_valid_key(clean_key):
                     keys.append(clean_key)
             
             print(f"Из файла {url.split('/')[-1]} получено ключей: {len(found)}")
             
-            if len(keys) >= 3:
-                break
         except Exception as e:
             print(f"Ошибка при загрузке {url}: {e}")
             continue
 
-    print(f"Итого отобрано для подписки: {len(keys[:3])} ключей.")
-    return keys[:3]
+    if not keys:
+        return []
+
+    # Берем 5 случайных ключей из всей собранной массы, чтобы не цеплять только начало файла
+    selected_keys = random.sample(keys, min(5, len(keys)))
+    print(f"Итого собрано уникальных ключей: {len(keys)}. Выбрано случайных для подписки: {len(selected_keys)}.")
+    return selected_keys
 
 def update_gist(new_keys: list):
     if not new_keys:
-        raise Exception("Не удалось получить ни одного ключа из источников.")
+        raise Exception("Не удалось получить ни одного рабочего ключа из источников.")
 
     if not GIST_TOKEN:
         raise Exception("Секрет GIST_TOKEN не найден в Secrets репозитория.")
@@ -120,4 +130,3 @@ def update_gist(new_keys: list):
 if __name__ == "__main__":
     fresh_keys = get_fresh_vless_keys()
     update_gist(fresh_keys)
-    
