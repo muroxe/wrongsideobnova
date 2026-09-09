@@ -20,6 +20,8 @@ SOURCES = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-SNI-RU-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
+    "https://github.com/zieng2/wl/blob/main/vless_lite.txt"
+    "https://github.com/zieng2/wl/blob/main/vless_universal.txt"
 ]
 
 def decode_base64_safely(data: str) -> str:
