@@ -19,8 +19,8 @@ SOURCES = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-SNI-RU-all.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
-    "https://github.com/zieng2/wl/blob/main/vless_lite.txt"
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt",
+    "https://github.com/zieng2/wl/blob/main/vless_lite.txt",
     "https://github.com/zieng2/wl/blob/main/vless_universal.txt"
 ]
 
@@ -41,13 +41,11 @@ def generate_dummy(name: str) -> str:
 def check_server_alive(key: str) -> bool:
     """Проверяет доступность сервера по TCP порту."""
     try:
-        # vless://uuid@host:port?...
         parts = key.split("@")
         if len(parts) < 2:
             return False
         host_port = parts[1].split("?")[0].split("#")[0]
         
-        # Поддержка IPv6 в квадратных скобках [::1]:port
         if "]:" in host_port:
             host, port_str = host_port.split("]:")
             host = host.lstrip("[")
@@ -56,14 +54,14 @@ def check_server_alive(key: str) -> bool:
             
         port = int(port_str)
         
-        # Проверяем TCP соединение с таймаутом 2.5 секунды
         with socket.create_connection((host, port), timeout=2.5):
             return True
     except Exception:
         return False
 
 def get_fresh_vless_keys() -> list:
-    candidates = []
+    cidr_candidates = []
+    normal_candidates = []
     headers_req = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
     for url in SOURCES:
@@ -74,6 +72,7 @@ def get_fresh_vless_keys() -> list:
             
             raw_text = res.text
             found = re.findall(r"(vless://[^\s\r\n]+)", raw_text)
+            is_cidr_source = "cidr" in url.lower()
             
             for key in found:
                 clean_key = key.strip()
@@ -81,46 +80,59 @@ def get_fresh_vless_keys() -> list:
                 if "#" in clean_key:
                     name = urllib.parse.unquote(clean_key.split("#", 1)[1]).lower()
                 
-                # Отсекаем заглушки и невалидные IP
                 bad_words = ["🛸", "🪐", "t.me", "wrongside", "update", "github", "127.0.0.1", "0.0.0.0"]
                 if any(word in name or word in clean_key.lower() for word in bad_words):
                     continue
                 
-                if clean_key not in candidates:
-                    candidates.append(clean_key)
+                if is_cidr_source or "cidr" in name:
+                    if clean_key not in cidr_candidates:
+                        cidr_candidates.append(clean_key)
+                else:
+                    if clean_key not in normal_candidates:
+                        normal_candidates.append(clean_key)
                     
         except Exception as e:
             print(f"Ошибка при загрузке {url}: {e}")
             continue
 
-    print(f"Всего кандидатов для проверки: {len(candidates)}")
-    if not candidates:
+    print(f"Кандидатов CIDR: {len(cidr_candidates)}, Обычных: {len(normal_candidates)}")
+    
+    if not cidr_candidates and not normal_candidates:
         return []
 
-    # Перемешиваем кандидатов перед пингом
-    random.shuffle(candidates)
+    random.shuffle(cidr_candidates)
+    random.shuffle(normal_candidates)
     
     alive_keys = []
-    # Быстрая параллельная проверка доступности серверов (в 20 потоков)
-    print("Проверяем доступность серверов (TCP Ping)...")
+    
+    print("Проверяем доступность CIDR серверов (TCP Ping)...")
     with ThreadPoolExecutor(max_workers=20) as executor:
-        results = executor.map(lambda k: (k, check_server_alive(k)), candidates[:60])
+        results = executor.map(lambda k: (k, check_server_alive(k)), cidr_candidates[:40])
         for key, is_alive in results:
             if is_alive:
                 alive_keys.append(key)
-                if len(alive_keys) >= 5:
+                if len(alive_keys) >= 2:
                     break
+
+    print("Проверяем доступность остальных серверов (TCP Ping)...")
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        needed_normal = 5 - len(alive_keys)
+        if needed_normal > 0:
+            results = executor.map(lambda k: (k, check_server_alive(k)), normal_candidates[:60])
+            for key, is_alive in results:
+                if is_alive:
+                    alive_keys.append(key)
+                    if len(alive_keys) >= 5:
+                        break
 
     print(f"Найдено живых серверов: {len(alive_keys)}")
 
-    # Формируем итоговый список: кастомная плашка + только живые ноды
     final_keys = [generate_dummy(text) for text in CUSTOM_HEADERS]
     final_keys.extend(alive_keys)
     
     return final_keys
 
 def update_gist(new_keys: list):
-    # Должен быть хотя бы 1 живой сервер помимо кастомной плашки
     if len(new_keys) <= len(CUSTOM_HEADERS):
         raise Exception("Не удалось найти ни одного живого сервера.")
 
@@ -171,3 +183,4 @@ def update_gist(new_keys: list):
 if __name__ == "__main__":
     fresh_keys = get_fresh_vless_keys()
     update_gist(fresh_keys)
+        
