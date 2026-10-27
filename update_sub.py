@@ -25,7 +25,9 @@ USE_BASE64 = False
 HEADER_LINES = [
     "#profile-title: WrongSideVPN",
     "#profile-update-interval: 1",
-    "#announce: ⚠️ Обходы белых списков работают только на мобильном интернете",
+    "#announce: ⚠️ Обходы белых списков работают только на мобильном интернете
+    Статус:Free
+    t.me/wrongsidevpn",
 ]
 
 CUSTOM_HEADERS = [
