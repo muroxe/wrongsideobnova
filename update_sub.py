@@ -1,7 +1,13 @@
+import os
 import re
+import json
 import base64
 import random
+import shutil
 import socket
+import tempfile
+import subprocess
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
@@ -10,144 +16,313 @@ import requests
 # ================== НАСТРОЙКИ ==================
 OUTPUT_FILE = "sub.txt"
 
-# Дата окончания подписки (показывается в клиенте). Поменяй когда нужно.
+# Дата окончания подписки (показывается в клиенте)
 EXPIRE_DATE = "2026-11-09"
 
 # True = отдавать подписку в base64, False = обычным текстом
 USE_BASE64 = False
 
-# Служебные строки в начале файла (читает Happ и совместимые клиенты)
 HEADER_LINES = [
     "#profile-title: WrongSideVPN",
     "#profile-update-interval: 1",
     "#announce: ⚠️ Обходы белых списков работают только на мобильном интернете",
 ]
 
-# Фейковые "ключи" с текстом сверху списка серверов
 CUSTOM_HEADERS = [
     "👅t.me/WrongSideVPN👅"
 ]
 
-SOURCES = [
+# Сколько серверов каждого типа брать (итого 10)
+MAX_WIFI = 5       # обычные серверы (не CIDR)
+MAX_CIDR = 3       # CIDR (белые списки РФ)
+MAX_FOREIGN = 2    # иностранные серверы из общих списков
+
+# Сколько кандидатов максимум проверять в каждой группе
+MAX_TEST = 150
+
+# Источники: РФ
+SOURCES_WIFI = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-SNI-RU-all.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt",
     "https://github.com/zieng2/wl/blob/main/vless_lite.txt",
     "https://github.com/zieng2/wl/blob/main/vless_universal.txt",
 ]
+SOURCES_CIDR = [
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt",
+]
+# Источники: иностранные серверы (можно добавлять свои)
+SOURCES_FOREIGN = [
+    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vless.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/All_Configs_Sub.txt",
+]
 
-MAX_CIDR = 5      # сколько CIDR-серверов брать
-MAX_WIFI = 5      # сколько обычных (wifi) серверов брать
+# Тест реального соединения через xray
+TEST_URL = "https://www.gstatic.com/generate_204"
+TEST_TIMEOUT = 8
+XRAY_BIN = os.environ.get("XRAY_BIN", "xray")
 # ===============================================
 
+BAD_WORDS = ["🛸", "🪐", "t.me", "wrongside", "update", "github", "127.0.0.1", "0.0.0.0"]
 
+
+# ---------- загрузка ----------
 def to_raw(url: str) -> str:
-    """github.com/.../blob/... -> raw.githubusercontent.com/..."""
     if "github.com" in url and "/blob/" in url:
         return url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
     return url
 
 
-def generate_dummy(name: str) -> str:
-    encoded_name = urllib.parse.quote(name)
-    return f"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:80?type=tcp&security=none#{encoded_name}"
-
-
-def check_server_alive(key: str) -> bool:
-    """Проверяет доступность сервера по TCP порту."""
+def decode_base64_safely(data: str) -> str:
+    cleaned = data.strip().replace(" ", "").replace("\n", "").replace("\r", "")
+    cleaned += "=" * (-len(cleaned) % 4)
     try:
-        parts = key.split("@")
-        if len(parts) < 2:
-            return False
-        host_port = parts[1].split("?")[0].split("#")[0]
+        return base64.b64decode(cleaned).decode("utf-8", errors="ignore")
+    except Exception:
+        return data
 
-        if "]:" in host_port:
-            host, port_str = host_port.split("]:")
-            host = host.lstrip("[")
+
+def load_keys(urls: list) -> list:
+    headers_req = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    keys = []
+    for url in urls:
+        try:
+            res = requests.get(to_raw(url), headers=headers_req, timeout=15)
+            if res.status_code != 200:
+                print(f"{url}: HTTP {res.status_code}")
+                continue
+            text = res.text
+            if "vless://" not in text:
+                text = decode_base64_safely(text)
+            for key in re.findall(r"(vless://[^\s\r\n]+)", text):
+                key = key.strip()
+                name = ""
+                if "#" in key:
+                    name = urllib.parse.unquote(key.split("#", 1)[1]).lower()
+                if any(w in name or w in key.lower() for w in BAD_WORDS):
+                    continue
+                if key not in keys:
+                    keys.append(key)
+        except Exception as e:
+            print(f"Ошибка при загрузке {url}: {e}")
+    return keys
+
+
+# ---------- vless:// -> конфиг xray ----------
+def parse_vless(key: str):
+    """Возвращает outbound для xray или None, если формат не поддерживается."""
+    try:
+        u = urllib.parse.urlsplit(key)
+        if u.scheme != "vless" or not u.username or not u.hostname or not u.port:
+            return None
+        p = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
+
+        network = p.get("type", "tcp")
+        security = p.get("security", "none")
+        host_hdr = p.get("host", "")
+        path = urllib.parse.unquote(p.get("path", "/"))
+
+        stream = {"security": security}
+        if network == "tcp":
+            if p.get("headerType", "none") not in ("none", ""):
+                return None
+            stream["network"] = "tcp"
+        elif network == "ws":
+            stream["network"] = "ws"
+            ws = {"path": path}
+            if host_hdr:
+                ws["headers"] = {"Host": host_hdr}
+            stream["wsSettings"] = ws
+        elif network == "grpc":
+            stream["network"] = "grpc"
+            stream["grpcSettings"] = {
+                "serviceName": urllib.parse.unquote(p.get("serviceName", "")),
+                "multiMode": p.get("mode", "") == "multi",
+            }
+        elif network in ("xhttp", "splithttp"):
+            stream["network"] = "xhttp"
+            xh = {"path": path}
+            if host_hdr:
+                xh["host"] = host_hdr
+            if p.get("mode"):
+                xh["mode"] = p["mode"]
+            stream["xhttpSettings"] = xh
+        elif network == "httpupgrade":
+            stream["network"] = "httpupgrade"
+            hu = {"path": path}
+            if host_hdr:
+                hu["host"] = host_hdr
+            stream["httpupgradeSettings"] = hu
         else:
-            host, port_str = host_port.split(":")
+            return None
 
-        with socket.create_connection((host, int(port_str)), timeout=2.5):
+        if security == "tls":
+            tls = {"serverName": p.get("sni") or host_hdr or u.hostname,
+                   "fingerprint": p.get("fp") or "chrome"}
+            if p.get("alpn"):
+                tls["alpn"] = urllib.parse.unquote(p["alpn"]).split(",")
+            if p.get("allowInsecure") in ("1", "true") or p.get("insecure") in ("1", "true"):
+                tls["allowInsecure"] = True
+            stream["tlsSettings"] = tls
+        elif security == "reality":
+            if not p.get("pbk"):
+                return None
+            stream["realitySettings"] = {
+                "serverName": p.get("sni", ""),
+                "fingerprint": p.get("fp") or "chrome",
+                "publicKey": p["pbk"],
+                "shortId": p.get("sid", ""),
+                "spiderX": urllib.parse.unquote(p.get("spx", "")),
+            }
+        elif security != "none":
+            return None
+
+        user = {"id": urllib.parse.unquote(u.username), "encryption": p.get("encryption", "none")}
+        if p.get("flow"):
+            user["flow"] = p["flow"]
+
+        return {
+            "protocol": "vless",
+            "settings": {"vnext": [{"address": u.hostname, "port": u.port, "users": [user]}]},
+            "streamSettings": stream,
+        }
+    except Exception:
+        return None
+
+
+# ---------- проверка ----------
+def check_tcp(key: str) -> bool:
+    try:
+        u = urllib.parse.urlsplit(key)
+        with socket.create_connection((u.hostname, u.port), timeout=2.5):
             return True
     except Exception:
         return False
 
 
-def pick_alive(candidates: list, limit: int) -> list:
-    alive = []
-    if limit <= 0:
-        return alive
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        for key, ok in executor.map(lambda k: (k, check_server_alive(k)), candidates):
-            if ok:
-                alive.append(key)
-                if len(alive) >= limit:
+def check_real(key: str, port: int) -> bool:
+    """Поднимает xray с этим ключом и ходит через него в интернет."""
+    outbound = parse_vless(key)
+    if not outbound:
+        return False
+    config = {
+        "log": {"loglevel": "none"},
+        "inbounds": [{"listen": "127.0.0.1", "port": port, "protocol": "socks",
+                      "settings": {"auth": "noauth", "udp": False}}],
+        "outbounds": [outbound],
+    }
+    tmpdir = tempfile.mkdtemp()
+    cfg_path = os.path.join(tmpdir, "c.json")
+    proc = None
+    try:
+        with open(cfg_path, "w") as f:
+            json.dump(config, f)
+        proc = subprocess.Popen([XRAY_BIN, "run", "-c", cfg_path],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # ждём, пока xray откроет локальный порт
+        started = False
+        for _ in range(30):
+            if proc.poll() is not None:
+                return False
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    started = True
                     break
-    return alive
+            except OSError:
+                time.sleep(0.1)
+        if not started:
+            return False
+
+        # два запроса подряд должны пройти
+        for _ in range(2):
+            r = subprocess.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 "-x", f"socks5h://127.0.0.1:{port}",
+                 "--max-time", str(TEST_TIMEOUT), TEST_URL],
+                capture_output=True, text=True)
+            if r.stdout.strip() not in ("204", "200"):
+                return False
+        return True
+    except Exception:
+        return False
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def get_fresh_vless_keys() -> list:
-    cidr_candidates = []
-    normal_candidates = []
-    headers_req = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    bad_words = ["🛸", "🪐", "t.me", "wrongside", "update", "github", "127.0.0.1", "0.0.0.0"]
+HAVE_XRAY = shutil.which(XRAY_BIN) is not None
+if not HAVE_XRAY:
+    print("ВНИМАНИЕ: xray не найден, используется только TCP-проверка (менее надёжная).")
 
-    for url in SOURCES:
-        try:
-            res = requests.get(to_raw(url), headers=headers_req, timeout=10)
-            if res.status_code != 200:
-                print(f"{url}: HTTP {res.status_code}")
-                continue
+_port_counter = [20000]
 
-            found = re.findall(r"(vless://[^\s\r\n]+)", res.text)
-            is_cidr_source = "cidr" in url.lower()
 
-            for key in found:
-                clean_key = key.strip()
-                name = ""
-                if "#" in clean_key:
-                    name = urllib.parse.unquote(clean_key.split("#", 1)[1]).lower()
+def pick_working(candidates: list, limit: int, used: set) -> list:
+    """Проверяет кандидатов пачками, пока не наберёт limit рабочих."""
+    result = []
+    if limit <= 0:
+        return result
+    pool = [k for k in candidates if k not in used][:MAX_TEST]
+    chunk_size = 24
+    for i in range(0, len(pool), chunk_size):
+        chunk = pool[i:i + chunk_size]
+        ports = [_port_counter[0] + n for n in range(len(chunk))]
+        _port_counter[0] += len(chunk)
+        if HAVE_XRAY:
+            fn = lambda kp: (kp[0], check_real(kp[0], kp[1]))
+        else:
+            fn = lambda kp: (kp[0], check_tcp(kp[0]))
+        with ThreadPoolExecutor(max_workers=chunk_size) as ex:
+            for key, ok in ex.map(fn, zip(chunk, ports)):
+                if ok and len(result) < limit:
+                    result.append(key)
+                    used.add(key)
+        if len(result) >= limit:
+            break
+    return result
 
-                if any(w in name or w in clean_key.lower() for w in bad_words):
-                    continue
 
-                target = cidr_candidates if (is_cidr_source or "cidr" in name) else normal_candidates
-                if clean_key not in target:
-                    target.append(clean_key)
-
-        except Exception as e:
-            print(f"Ошибка при загрузке {url}: {e}")
-
-    print(f"Кандидатов CIDR: {len(cidr_candidates)}, Обычных: {len(normal_candidates)}")
-
-    random.shuffle(cidr_candidates)
-    random.shuffle(normal_candidates)
-
-    print("Проверяем CIDR серверы...")
-    cidr_alive = pick_alive(cidr_candidates[:80], MAX_CIDR)
-
-    print("Проверяем обычные (wifi) серверы...")
-    wifi_alive = pick_alive(normal_candidates[:100], MAX_WIFI)
-
-    print(f"Живых CIDR: {len(cidr_alive)}/{MAX_CIDR}, wifi: {len(wifi_alive)}/{MAX_WIFI}")
-    return wifi_alive + cidr_alive
+# ---------- сборка ----------
+def generate_dummy(name: str) -> str:
+    return f"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:80?type=tcp&security=none#{urllib.parse.quote(name)}"
 
 
 def build_userinfo() -> str:
-    expire_ts = int(datetime.strptime(EXPIRE_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
-    return f"#subscription-userinfo: upload=0; download=0; total=0; expire={expire_ts}"
+    ts = int(datetime.strptime(EXPIRE_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    return f"#subscription-userinfo: upload=0; download=0; total=0; expire={ts}"
 
 
-def write_subscription(alive_keys: list):
-    if not alive_keys:
-        raise Exception("Не удалось найти ни одного живого сервера. Файл не изменён.")
+def get_fresh_keys() -> list:
+    wifi = load_keys(SOURCES_WIFI)
+    cidr = load_keys(SOURCES_CIDR)
+    foreign = load_keys(SOURCES_FOREIGN)
+    print(f"Кандидатов: wifi {len(wifi)}, cidr {len(cidr)}, foreign {len(foreign)}")
+
+    for lst in (wifi, cidr, foreign):
+        random.shuffle(lst)
+
+    used = set()
+    cidr_ok = pick_working(cidr, MAX_CIDR, used)
+    wifi_ok = pick_working(wifi, MAX_WIFI, used)
+    foreign_ok = pick_working(foreign, MAX_FOREIGN, used)
+
+    print(f"Рабочих: wifi {len(wifi_ok)}/{MAX_WIFI}, cidr {len(cidr_ok)}/{MAX_CIDR}, "
+          f"foreign {len(foreign_ok)}/{MAX_FOREIGN}")
+    return wifi_ok + cidr_ok + foreign_ok
+
+
+def write_subscription(keys: list):
+    if not keys:
+        raise Exception("Не найдено ни одного рабочего сервера. Файл не изменён.")
 
     lines = list(HEADER_LINES)
     lines.append(build_userinfo())
     lines.extend(generate_dummy(t) for t in CUSTOM_HEADERS)
-    lines.extend(alive_keys)
+    lines.extend(keys)
 
     content = "\n".join(lines) + "\n"
     if USE_BASE64:
@@ -155,10 +330,8 @@ def write_subscription(alive_keys: list):
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(content)
-
-    print(f"Готово: {OUTPUT_FILE}, серверов: {len(alive_keys)}")
+    print(f"Готово: {OUTPUT_FILE}, серверов: {len(keys)}")
 
 
 if __name__ == "__main__":
-    write_subscription(get_fresh_vless_keys())
-    
+    write_subscription(get_fresh_keys())
