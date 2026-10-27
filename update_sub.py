@@ -17,7 +17,7 @@ import requests
 OUTPUT_FILE = "sub.txt"
 
 # Дата окончания подписки (показывается в клиенте)
-EXPIRE_DATE = "2026-11-09"
+EXPIRE_DATE = "0-0-3333"
 
 # True = отдавать подписку в base64, False = обычным текстом
 USE_BASE64 = False
