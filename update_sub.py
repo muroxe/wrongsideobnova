@@ -1,15 +1,29 @@
-import os
 import re
 import base64
 import random
 import socket
 import urllib.parse
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import requests
 
-GIST_TOKEN = os.environ.get("GIST_TOKEN")
-GIST_ID = os.environ.get("GIST_ID", "d80e40f8efb3fcfacd9c631e12c73e1e")
+# ================== НАСТРОЙКИ ==================
+OUTPUT_FILE = "sub.txt"
 
+# Дата окончания подписки (показывается в клиенте). Поменяй когда нужно.
+EXPIRE_DATE = "2026-11-09"
+
+# True = отдавать подписку в base64, False = обычным текстом
+USE_BASE64 = False
+
+# Служебные строки в начале файла (читает Happ и совместимые клиенты)
+HEADER_LINES = [
+    "#profile-title: WrongSideVPN",
+    "#profile-update-interval: 1",
+    "#announce: ⚠️ Обходы белых списков работают только на мобильном интернете",
+]
+
+# Фейковые "ключи" с текстом сверху списка серверов
 CUSTOM_HEADERS = [
     "👅t.me/WrongSideVPN👅"
 ]
@@ -21,22 +35,25 @@ SOURCES = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-SNI-RU-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt",
     "https://github.com/zieng2/wl/blob/main/vless_lite.txt",
-    "https://github.com/zieng2/wl/blob/main/vless_universal.txt"
+    "https://github.com/zieng2/wl/blob/main/vless_universal.txt",
 ]
 
-def decode_base64_safely(data: str) -> str:
-    cleaned = data.strip().replace(" ", "").replace("\n", "").replace("\r", "")
-    missing_padding = len(cleaned) % 4
-    if missing_padding:
-        cleaned += "=" * (4 - missing_padding)
-    try:
-        return base64.b64decode(cleaned).decode("utf-8", errors="ignore")
-    except Exception:
-        return data
+MAX_CIDR = 5      # сколько CIDR-серверов брать
+MAX_WIFI = 5      # сколько обычных (wifi) серверов брать
+# ===============================================
+
+
+def to_raw(url: str) -> str:
+    """github.com/.../blob/... -> raw.githubusercontent.com/..."""
+    if "github.com" in url and "/blob/" in url:
+        return url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+    return url
+
 
 def generate_dummy(name: str) -> str:
     encoded_name = urllib.parse.quote(name)
     return f"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:80?type=tcp&security=none#{encoded_name}"
+
 
 def check_server_alive(key: str) -> bool:
     """Проверяет доступность сервера по TCP порту."""
@@ -45,142 +62,103 @@ def check_server_alive(key: str) -> bool:
         if len(parts) < 2:
             return False
         host_port = parts[1].split("?")[0].split("#")[0]
-        
+
         if "]:" in host_port:
             host, port_str = host_port.split("]:")
             host = host.lstrip("[")
         else:
             host, port_str = host_port.split(":")
-            
-        port = int(port_str)
-        
-        with socket.create_connection((host, port), timeout=2.5):
+
+        with socket.create_connection((host, int(port_str)), timeout=2.5):
             return True
     except Exception:
         return False
+
+
+def pick_alive(candidates: list, limit: int) -> list:
+    alive = []
+    if limit <= 0:
+        return alive
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        for key, ok in executor.map(lambda k: (k, check_server_alive(k)), candidates):
+            if ok:
+                alive.append(key)
+                if len(alive) >= limit:
+                    break
+    return alive
+
 
 def get_fresh_vless_keys() -> list:
     cidr_candidates = []
     normal_candidates = []
     headers_req = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    
+    bad_words = ["🛸", "🪐", "t.me", "wrongside", "update", "github", "127.0.0.1", "0.0.0.0"]
+
     for url in SOURCES:
         try:
-            res = requests.get(url, headers=headers_req, timeout=10)
+            res = requests.get(to_raw(url), headers=headers_req, timeout=10)
             if res.status_code != 200:
+                print(f"{url}: HTTP {res.status_code}")
                 continue
-            
-            raw_text = res.text
-            found = re.findall(r"(vless://[^\s\r\n]+)", raw_text)
+
+            found = re.findall(r"(vless://[^\s\r\n]+)", res.text)
             is_cidr_source = "cidr" in url.lower()
-            
+
             for key in found:
                 clean_key = key.strip()
                 name = ""
                 if "#" in clean_key:
                     name = urllib.parse.unquote(clean_key.split("#", 1)[1]).lower()
-                
-                bad_words = ["🛸", "🪐", "t.me", "wrongside", "update", "github", "127.0.0.1", "0.0.0.0"]
-                if any(word in name or word in clean_key.lower() for word in bad_words):
+
+                if any(w in name or w in clean_key.lower() for w in bad_words):
                     continue
-                
-                if is_cidr_source or "cidr" in name:
-                    if clean_key not in cidr_candidates:
-                        cidr_candidates.append(clean_key)
-                else:
-                    if clean_key not in normal_candidates:
-                        normal_candidates.append(clean_key)
-                    
+
+                target = cidr_candidates if (is_cidr_source or "cidr" in name) else normal_candidates
+                if clean_key not in target:
+                    target.append(clean_key)
+
         except Exception as e:
             print(f"Ошибка при загрузке {url}: {e}")
-            continue
 
     print(f"Кандидатов CIDR: {len(cidr_candidates)}, Обычных: {len(normal_candidates)}")
-    
-    if not cidr_candidates and not normal_candidates:
-        return []
 
     random.shuffle(cidr_candidates)
     random.shuffle(normal_candidates)
-    
-    alive_keys = []
-    
-    print("Проверяем доступность CIDR серверов (TCP Ping)...")
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        results = executor.map(lambda k: (k, check_server_alive(k)), cidr_candidates[:40])
-        for key, is_alive in results:
-            if is_alive:
-                alive_keys.append(key)
-                if len(alive_keys) >= 2:
-                    break
 
-    print("Проверяем доступность остальных серверов (TCP Ping)...")
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        needed_normal = 5 - len(alive_keys)
-        if needed_normal > 0:
-            results = executor.map(lambda k: (k, check_server_alive(k)), normal_candidates[:60])
-            for key, is_alive in results:
-                if is_alive:
-                    alive_keys.append(key)
-                    if len(alive_keys) >= 5:
-                        break
+    print("Проверяем CIDR серверы...")
+    cidr_alive = pick_alive(cidr_candidates[:80], MAX_CIDR)
 
-    print(f"Найдено живых серверов: {len(alive_keys)}")
+    print("Проверяем обычные (wifi) серверы...")
+    wifi_alive = pick_alive(normal_candidates[:100], MAX_WIFI)
 
-    final_keys = [generate_dummy(text) for text in CUSTOM_HEADERS]
-    final_keys.extend(alive_keys)
-    
-    return final_keys
+    print(f"Живых CIDR: {len(cidr_alive)}/{MAX_CIDR}, wifi: {len(wifi_alive)}/{MAX_WIFI}")
+    return wifi_alive + cidr_alive
 
-def update_gist(new_keys: list):
-    if len(new_keys) <= len(CUSTOM_HEADERS):
-        raise Exception("Не удалось найти ни одного живого сервера.")
 
-    if not GIST_TOKEN:
-        raise Exception("Секрет GIST_TOKEN не найден.")
+def build_userinfo() -> str:
+    expire_ts = int(datetime.strptime(EXPIRE_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    return f"#subscription-userinfo: upload=0; download=0; total=0; expire={expire_ts}"
 
-    headers = {
-        "Authorization": f"Bearer {GIST_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
 
-    get_res = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers, timeout=10)
-    if get_res.status_code != 200:
-        raise Exception(f"Ошибка доступа к Gist ({get_res.status_code})")
+def write_subscription(alive_keys: list):
+    if not alive_keys:
+        raise Exception("Не удалось найти ни одного живого сервера. Файл не изменён.")
 
-    gist_json = get_res.json()
-    files = gist_json.get("files", {})
-    filename = list(files.keys())[0]
-    old_content = files[filename].get("content", "")
+    lines = list(HEADER_LINES)
+    lines.append(build_userinfo())
+    lines.extend(generate_dummy(t) for t in CUSTOM_HEADERS)
+    lines.extend(alive_keys)
 
-    is_base64 = False
-    if "vless://" not in old_content and "vmess://" not in old_content:
-        decoded_try = decode_base64_safely(old_content)
-        if "vless://" in decoded_try:
-            old_content = decoded_try
-            is_base64 = True
+    content = "\n".join(lines) + "\n"
+    if USE_BASE64:
+        content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
 
-    lines = [line.strip() for line in old_content.splitlines() if line.strip()]
-    static_lines = [line for line in lines if not line.startswith("vless://")]
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write(content)
 
-    updated_lines = static_lines + new_keys
-    final_raw_content = "\n".join(updated_lines)
+    print(f"Готово: {OUTPUT_FILE}, серверов: {len(alive_keys)}")
 
-    if is_base64:
-        final_payload = base64.b64encode(final_raw_content.encode("utf-8")).decode("utf-8")
-    else:
-        final_payload = final_raw_content
-
-    patch_payload = {"files": {filename: {"content": final_payload}}}
-
-    patch_res = requests.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=patch_payload, timeout=10)
-    if patch_res.status_code == 200:
-        print(f"Успех! Обновлено: {len(new_keys) - len(CUSTOM_HEADERS)} живых серверов.")
-    else:
-        raise Exception(f"Ошибка записи в Gist ({patch_res.status_code})")
 
 if __name__ == "__main__":
-    fresh_keys = get_fresh_vless_keys()
-    update_gist(fresh_keys)
-        
+    write_subscription(get_fresh_vless_keys())
+    
