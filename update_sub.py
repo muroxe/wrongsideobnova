@@ -25,6 +25,9 @@ TT_TARGET = 100        # сколько рабочих серверов в пу�
 TT_MAX_TEST = 800      # сколько кандидатов максимум проверять
 TT_POOL_PATH = os.environ.get("TT_POOL_PATH", "")  # секретная строка для адреса пула
 
+# True = отдавать подписку в base64, False = обычным текстом
+USE_BASE64 = False
+
 HEADER_LINES = [
     "#profile-title: WrongSideVPN",
     "#profile-update-interval: 1",
@@ -37,8 +40,8 @@ CUSTOM_HEADERS = [
 
 # Сколько серверов каждого типа брать (итого 10)
 MAX_WIFI = 5       # обычные серверы (не CIDR)
-MAX_CIDR = 1      # CIDR (белые списки РФ)
-MAX_FOREIGN = 5   # иностранные серверы из общих списков
+MAX_CIDR = 3       # CIDR (белые списки РФ)
+MAX_FOREIGN = 2    # иностранные серверы из общих списков
 
 # Сколько кандидатов максимум проверять в каждой группе
 MAX_TEST = 150
@@ -57,7 +60,6 @@ SOURCES_CIDR = [
 ]
 # Источники: иностранные серверы (можно добавлять свои)
 SOURCES_FOREIGN = [
-    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vless.txt",
     "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/All_Configs_Sub.txt",
 ]
 
@@ -259,6 +261,8 @@ def check_real(key: str, port: int) -> bool:
 
 HAVE_XRAY = shutil.which(XRAY_BIN) is not None
 if not HAVE_XRAY:
+    if os.environ.get("CI"):
+        raise SystemExit("xray не найден. Проверь, что в workflow есть шаг Install Xray (берите новый update_sub.yml).")
     print("ВНИМАНИЕ: xray не найден, используется только TCP-проверка (менее надёжная).")
 
 _port_counter = [20000]
@@ -361,4 +365,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
