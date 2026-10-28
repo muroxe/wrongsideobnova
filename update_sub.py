@@ -16,18 +16,19 @@ import requests
 # ================== НАСТРОЙКИ ==================
 OUTPUT_FILE = "sub.txt"
 
-# Дата окончания подписки (показывается в клиенте)
-EXPIRE_DATE = "0-0-3333"
+# Основная подписка бесконечная (expire=0)
+SITE_URL = "https://sub.wrongside.ru"
+OUT_DIR = "site"
 
-# True = отдавать подписку в base64, False = обычным текстом
-USE_BASE64 = False
+# Пул для TikTok-подписок (его раздаёт бот). Лежит по секретному пути.
+TT_TARGET = 100        # сколько рабочих серверов в пуле
+TT_MAX_TEST = 800      # сколько кандидатов максимум проверять
+TT_POOL_PATH = os.environ.get("TT_POOL_PATH", "")  # секретная строка для адреса пула
 
 HEADER_LINES = [
     "#profile-title: WrongSideVPN",
     "#profile-update-interval: 1",
-    "#announce: ⚠️ Обходы белых списков работают только на мобильном интернете
-    Статус:Free
-    t.me/wrongsidevpn",
+    "#announce: ⚠️ Обходы белых списков работают только на мобильном интернете",
 ]
 
 CUSTOM_HEADERS = [
@@ -36,8 +37,8 @@ CUSTOM_HEADERS = [
 
 # Сколько серверов каждого типа брать (итого 10)
 MAX_WIFI = 5       # обычные серверы (не CIDR)
-MAX_CIDR = 3       # CIDR (белые списки РФ)
-MAX_FOREIGN = 3    # иностранные серверы из общих списков
+MAX_CIDR = 1      # CIDR (белые списки РФ)
+MAX_FOREIGN = 5   # иностранные серверы из общих списков
 
 # Сколько кандидатов максимум проверять в каждой группе
 MAX_TEST = 150
@@ -263,13 +264,12 @@ if not HAVE_XRAY:
 _port_counter = [20000]
 
 
-def pick_working(candidates: list, limit: int, used: set) -> list:
+def pick_working(candidates: list, limit: int, used: set, max_test=None, chunk_size=24) -> list:
     """Проверяет кандидатов пачками, пока не наберёт limit рабочих."""
     result = []
     if limit <= 0:
         return result
-    pool = [k for k in candidates if k not in used][:MAX_TEST]
-    chunk_size = 24
+    pool = [k for k in candidates if k not in used][:(max_test or MAX_TEST)]
     for i in range(0, len(pool), chunk_size):
         chunk = pool[i:i + chunk_size]
         ports = [_port_counter[0] + n for n in range(len(chunk))]
@@ -293,17 +293,43 @@ def generate_dummy(name: str) -> str:
     return f"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:80?type=tcp&security=none#{urllib.parse.quote(name)}"
 
 
-def build_userinfo() -> str:
-    ts = int(datetime.strptime(EXPIRE_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
-    return f"#subscription-userinfo: upload=0; download=0; total=0; expire={ts}"
+def build_userinfo(expire_ts: int = 0) -> str:
+    return f"#subscription-userinfo: upload=0; download=0; total=0; expire={expire_ts}"
 
 
-def get_fresh_keys() -> list:
+def write_text(path: str, lines: list):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    content = "\n".join(lines) + "\n"
+    if USE_BASE64:
+        content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+# ---------- пул для TikTok ----------
+def build_pool(pool_sources: list):
+    if not TT_POOL_PATH:
+        print("TikTok: TT_POOL_PATH не задан, пул не собираю.")
+        return
+    random.shuffle(pool_sources)
+    print(f"TikTok: проверяю пул, цель {TT_TARGET} серверов...")
+    pool = pick_working(pool_sources, TT_TARGET, set(), max_test=TT_MAX_TEST, chunk_size=48)
+    print(f"TikTok: в пуле {len(pool)} рабочих серверов")
+    if not pool:
+        print("TikTok: пул пуст, файл не создан.")
+        return
+    path = os.path.join(OUT_DIR, "p", f"{TT_POOL_PATH}.txt")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(pool) + "\n")
+
+
+# ---------- главная ----------
+def main():
     wifi = load_keys(SOURCES_WIFI)
     cidr = load_keys(SOURCES_CIDR)
     foreign = load_keys(SOURCES_FOREIGN)
     print(f"Кандидатов: wifi {len(wifi)}, cidr {len(cidr)}, foreign {len(foreign)}")
-
     for lst in (wifi, cidr, foreign):
         random.shuffle(lst)
 
@@ -311,29 +337,28 @@ def get_fresh_keys() -> list:
     cidr_ok = pick_working(cidr, MAX_CIDR, used)
     wifi_ok = pick_working(wifi, MAX_WIFI, used)
     foreign_ok = pick_working(foreign, MAX_FOREIGN, used)
-
+    keys = wifi_ok + cidr_ok + foreign_ok
     print(f"Рабочих: wifi {len(wifi_ok)}/{MAX_WIFI}, cidr {len(cidr_ok)}/{MAX_CIDR}, "
           f"foreign {len(foreign_ok)}/{MAX_FOREIGN}")
-    return wifi_ok + cidr_ok + foreign_ok
-
-
-def write_subscription(keys: list):
     if not keys:
-        raise Exception("Не найдено ни одного рабочего сервера. Файл не изменён.")
+        raise Exception("Не найдено ни одного рабочего сервера. Сайт не обновлён.")
 
-    lines = list(HEADER_LINES)
-    lines.append(build_userinfo())
-    lines.extend(generate_dummy(t) for t in CUSTOM_HEADERS)
-    lines.extend(keys)
+    # основная бесконечная подписка
+    lines = list(HEADER_LINES) + [build_userinfo(0)]
+    lines += [generate_dummy(t) for t in CUSTOM_HEADERS] + keys
+    write_text(os.path.join(OUT_DIR, "sub.txt"), lines)
 
-    content = "\n".join(lines) + "\n"
-    if USE_BASE64:
-        content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+    # служебные файлы сайта
+    with open(os.path.join(OUT_DIR, "CNAME"), "w") as f:
+        f.write(SITE_URL.replace("https://", "") + "\n")
+    with open(os.path.join(OUT_DIR, "index.html"), "w") as f:
+        f.write("<!doctype html><title>WrongSideVPN</title>")
 
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        f.write(content)
-    print(f"Готово: {OUTPUT_FILE}, серверов: {len(keys)}")
+    # пул для TikTok-подписок
+    build_pool(wifi + cidr + foreign)
+    print("Готово")
 
 
 if __name__ == "__main__":
-    write_subscription(get_fresh_keys())
+    main()
+        
