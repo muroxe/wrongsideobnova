@@ -72,6 +72,13 @@ XRAY_BIN = os.environ.get("XRAY_BIN", "xray")
 BAD_WORDS = ["🛸", "🪐", "t.me", "wrongside", "update", "github", "127.0.0.1", "0.0.0.0"]
 
 
+def good_name(name: str) -> bool:
+    """Название должно быть читаемым: минимум 2 буквы (латиница/кириллица), без арабской вязи."""
+    if not name or re.search(r"[\u0600-\u06FF]", name):
+        return False
+    return len(re.findall(r"[A-Za-zА-Яа-яЁё]", name)) >= 2
+
+
 # ---------- загрузка ----------
 def to_raw(url: str) -> str:
     if "github.com" in url and "/blob/" in url:
@@ -86,6 +93,21 @@ def decode_base64_safely(data: str) -> str:
         return base64.b64decode(cleaned).decode("utf-8", errors="ignore")
     except Exception:
         return data
+
+
+def tag_for(url: str) -> str:
+    """Две метки: 📱 Моб. (мобильный интернет, белые списки) и 📶 Wi-Fi (всё остальное)."""
+    u = url.lower()
+    if any(w in u for w in ("mobile", "cidr", "white-sni", "zieng2")):
+        return "📱 Моб."
+    return "📶 Wi-Fi"
+
+
+def retag(key: str, tag: str) -> str:
+    """Добавляет метку в начало названия сервера (часть после #)."""
+    base, sep, frag = key.partition("#")
+    orig = urllib.parse.unquote(frag) if sep else ""
+    return base + "#" + urllib.parse.quote(f"{tag} {orig}".strip())
 
 
 def load_keys(urls: list) -> list:
@@ -105,8 +127,9 @@ def load_keys(urls: list) -> list:
                 name = ""
                 if "#" in key:
                     name = urllib.parse.unquote(key.split("#", 1)[1]).lower()
-                if "@" in name or any(w in name or w in key.lower() for w in BAD_WORDS):
+                if "@" in name or not good_name(name) or any(w in name or w in key.lower() for w in BAD_WORDS):
                     continue
+                key = retag(key, tag_for(url))
                 if key not in keys:
                     keys.append(key)
         except Exception as e:
