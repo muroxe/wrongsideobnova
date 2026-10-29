@@ -105,7 +105,7 @@ def load_keys(urls: list) -> list:
                 name = ""
                 if "#" in key:
                     name = urllib.parse.unquote(key.split("#", 1)[1]).lower()
-                if any(w in name or w in key.lower() for w in BAD_WORDS):
+                if "@" in name or any(w in name or w in key.lower() for w in BAD_WORDS):
                     continue
                 if key not in keys:
                     keys.append(key)
@@ -365,4 +365,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
