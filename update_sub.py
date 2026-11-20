@@ -20,10 +20,12 @@ OUTPUT_FILE = "sub.txt"
 SITE_URL = "https://sub.wrongside.ru"
 OUT_DIR = "site"
 
-# Пул для TikTok-подписок (его раздаёт бот). Лежит по секретному пути.
-TT_TARGET = 100        # сколько рабочих серверов в пуле
-TT_MAX_TEST = 800      # сколько кандидатов максимум проверять
-TT_POOL_PATH = os.environ.get("TT_POOL_PATH", "")  # секретная строка для адреса пула
+# Пул для кликер-подписки (его раздаёт бот). Лежит по секретному пути.
+CK_TARGET = 100        # сколько рабочих серверов в пуле кликер-подписки
+MAX_POOL_TEST = 800    # сколько кандидатов максимум проверять для пула
+CK_POOL_PATH = os.environ.get("CK_POOL_PATH") or os.environ.get("TT_POOL_PATH", "")  # секретная строка для адреса пула
+SP_POOL_PATH = os.environ.get("SP_POOL_PATH", "")  # секретная строка для пула подписки за задания
+SP_TARGET = 100        # серверов в пуле подписки за задания
 
 # True = отдавать подписку в base64, False = обычным текстом
 USE_BASE64 = False
@@ -291,12 +293,20 @@ if not HAVE_XRAY:
 _port_counter = [20000]
 
 
+def host_port(key: str) -> str:
+    try:
+        u = urllib.parse.urlsplit(key)
+        return f"hp:{u.hostname}:{u.port}"
+    except Exception:
+        return key
+
+
 def pick_working(candidates: list, limit: int, used: set, max_test=None, chunk_size=24) -> list:
     """Проверяет кандидатов пачками, пока не наберёт limit рабочих."""
     result = []
     if limit <= 0:
         return result
-    pool = [k for k in candidates if k not in used][:(max_test or MAX_TEST)]
+    pool = [k for k in candidates if k not in used and host_port(k) not in used][:(max_test or MAX_TEST)]
     for i in range(0, len(pool), chunk_size):
         chunk = pool[i:i + chunk_size]
         ports = [_port_counter[0] + n for n in range(len(chunk))]
@@ -307,9 +317,10 @@ def pick_working(candidates: list, limit: int, used: set, max_test=None, chunk_s
             fn = lambda kp: (kp[0], check_tcp(kp[0]))
         with ThreadPoolExecutor(max_workers=chunk_size) as ex:
             for key, ok in ex.map(fn, zip(chunk, ports)):
-                if ok and len(result) < limit:
+                if ok and len(result) < limit and host_port(key) not in used:
                     result.append(key)
                     used.add(key)
+                    used.add(host_port(key))  # один сервер (host:port) только один раз
         if len(result) >= limit:
             break
     return result
@@ -333,19 +344,20 @@ def write_text(path: str, lines: list):
         f.write(content)
 
 
-# ---------- пул для TikTok ----------
-def build_pool(pool_sources: list):
-    if not TT_POOL_PATH:
-        print("TikTok: TT_POOL_PATH не задан, пул не собираю.")
+# ---------- пул для кликер-подписки ----------
+def build_pool(name: str, secret_path: str, target: int, pool_sources: list, used: set):
+    """Собирает пул рабочих серверов в site/p/<secret_path>.txt. used общий, чтобы пулы не пересекались."""
+    if not secret_path:
+        print(f"{name}: секретный путь не задан, пул не собираю.")
         return
     random.shuffle(pool_sources)
-    print(f"TikTok: проверяю пул, цель {TT_TARGET} серверов...")
-    pool = pick_working(pool_sources, TT_TARGET, set(), max_test=TT_MAX_TEST, chunk_size=48)
-    print(f"TikTok: в пуле {len(pool)} рабочих серверов")
+    print(f"{name}: проверяю пул, цель {target} серверов...")
+    pool = pick_working(pool_sources, target, used, max_test=MAX_POOL_TEST, chunk_size=48)
+    print(f"{name}: в пуле {len(pool)} рабочих серверов")
     if not pool:
-        print("TikTok: пул пуст, файл не создан.")
+        print(f"{name}: пул пуст, файл не создан.")
         return
-    path = os.path.join(OUT_DIR, "p", f"{TT_POOL_PATH}.txt")
+    path = os.path.join(OUT_DIR, "p", f"{secret_path}.txt")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(pool) + "\n")
@@ -381,8 +393,11 @@ def main():
     with open(os.path.join(OUT_DIR, "index.html"), "w") as f:
         f.write("<!doctype html><title>WrongSideVPN</title>")
 
-    # пул для TikTok-подписок
-    build_pool(wifi + cidr + foreign)
+    # пулы для кликер-подписки и подписки за задания
+    pool_sources = wifi + cidr + foreign
+    pool_used = set()
+    build_pool("Кликер", CK_POOL_PATH, CK_TARGET, pool_sources, pool_used)
+    build_pool("Задания", SP_POOL_PATH, SP_TARGET, list(pool_sources), pool_used)
     print("Готово")
 
 
