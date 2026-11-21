@@ -41,7 +41,6 @@ jobs:
         env:
           CK_POOL_PATH: ${{ secrets.CK_POOL_PATH }}
           TT_POOL_PATH: ${{ secrets.TT_POOL_PATH }}
-          SP_POOL_PATH: ${{ secrets.SP_POOL_PATH }}
         run: python update_sub.py
 
       - name: Upload site
