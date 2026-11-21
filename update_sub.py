@@ -24,8 +24,6 @@ OUT_DIR = "site"
 CK_TARGET = 100        # сколько рабочих серверов в пуле кликер-подписки
 MAX_POOL_TEST = 800    # сколько кандидатов максимум проверять для пула
 CK_POOL_PATH = os.environ.get("CK_POOL_PATH") or os.environ.get("TT_POOL_PATH", "")  # секретная строка для адреса пула
-SP_POOL_PATH = os.environ.get("SP_POOL_PATH", "")  # секретная строка для пула подписки за задания
-SP_TARGET = 100        # серверов в пуле подписки за задания
 
 # True = отдавать подписку в base64, False = обычным текстом
 USE_BASE64 = False
@@ -393,11 +391,10 @@ def main():
     with open(os.path.join(OUT_DIR, "index.html"), "w") as f:
         f.write("<!doctype html><title>WrongSideVPN</title>")
 
-    # пулы для кликер-подписки и подписки за задания
+    # пул для кликер-подписки
     pool_sources = wifi + cidr + foreign
     pool_used = set()
     build_pool("Кликер", CK_POOL_PATH, CK_TARGET, pool_sources, pool_used)
-    build_pool("Задания", SP_POOL_PATH, SP_TARGET, list(pool_sources), pool_used)
     print("Готово")
 
 
